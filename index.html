@@ -1,0 +1,166 @@
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>MIDI to OSC</title>
+  <script src="https://unpkg.com/vue@3.2.31/dist/vue.global.js"></script>
+</head>
+<body>
+  <h1>MIDI to OSC</h1>
+  <div id="app">
+    <div style="display: flex">
+      <div>テスト</div>
+      <input type="text" v-model="test.osc" style="width: 20em; margin-left: 1em"/>
+      <input type="number" v-model="test.value" style="width: 5em; margin-left: 1em"/>
+      <button type="button" @click="runTest" style="width: 5em; margin-left: 1em"/>送信</button>
+    </div>
+    <div style="margin-top: 32px">
+      <div
+        v-for="control in controls"
+        style="display: flex"
+      >
+        <div>{{ control.name }}</div>
+        <input type="number" v-if="control.event === 'ControlChange'" v-model="control.controlNumber" style="width: 3em; margin-left: 1em" />
+        <input type="text" v-model="control.osc" style="width: 20em; margin-left: 1em"/>
+        <input type="number" v-model="control.addtional" style="width: 5em; margin-left: 1em"/>
+      </div>
+      <button type="button" @click="addControlChange">+</button>
+    </div>
+    <div style="margin-top: 32px; font-size: 0.8em; max-height: 9em; overflow-y: scroll">
+      <div
+        v-for="log in logs"
+        :style="{ color: { default: '#444', info: '#999', error: '#f00' }[log.type] }"
+      >
+        {{ log.message }}
+      </div>
+    </div>
+  </div>
+</body>
+<script type="text/javascript">
+  const { ipcRenderer } = require('electron')
+
+  const Counter = {
+    data() {
+      return {
+        test: {
+          osc: '/input/Jump',
+          value: 1
+        },
+        controls: [
+          {
+            name: 'Note on (0-127)',
+            event: 'NoteOn',
+            type: 'Integer',
+            osc: '/avatar/parameters/VRCEmote',
+            addtional: '0'
+          },
+          {
+            name: 'Note off (0-127)',
+            event: 'NoteOff',
+            type: 'Integer',
+            osc: '/avatar/parameters/VRCEmote',
+            addtional: '0'
+          },
+          {
+            name: 'CC (0.0-1.0)',
+            event: 'ControlChange',
+            controlNumber: 12,
+            type: 'Float',
+            osc: '/avatar/parameters/VelocityY',
+            addtional: '0'
+          }
+        ],
+        logs: []
+      }
+    },
+    methods: {
+      runTest() {
+        const params = { osc: this.test.osc, value: Number(this.test.value) }
+        this.pushLog(`${ params.osc } - ${ params.value }`, 'info')
+        ipcRenderer.send('oscMessage', { message: JSON.stringify(params) })
+      },
+      addControlChange() {
+        this.controls.push({
+          name: 'CC (0.0-1.0)',
+          event: 'ControlChange',
+          controlNumber: 13,
+          type: 'Float',
+          osc: '/avatar/parameters/VelocityY',
+          addtional: '0'
+        })
+      },
+      setUpEventListener(midiAccess) {
+        midiAccess.inputs.forEach((input) => {
+          this.pushLog(`MIDIデバイスに接続しました ${ input.name }`)
+
+          input.addEventListener('midimessage', (event) => {
+            const { data } = event
+
+            const root = data[0] >> 4
+            switch (root) {
+              // Note off
+              case 0x8:
+              // Note on
+              case 0x9:
+                // Velocity 0の場合もNoteOffとして扱われる
+                if (root === 0x8 || data[2] === 0) {
+                  this.pushLog(`Note off - ${ data[1] }`, 'info')
+                  this.controls.forEach((control) => {
+                    if (control.event === 'NoteOff' && control.osc !== '') {
+                      const params = { osc: control.osc, value: Number(data[1]) + Number(control.addtional) }
+                      this.pushLog(`${ params.osc } - ${ params.value }`, 'info')
+                      ipcRenderer.send('oscMessage', { message: JSON.stringify(params) })
+                    }
+                  })
+                  return
+                }
+
+                this.pushLog(`Note on - ${ data[1] }`, 'info')
+                this.controls.forEach((control) => {
+                  if (control.event === 'NoteOn' && control.osc !== '') {
+                    const params = { osc: control.osc, value: Number(data[1]) + Number(control.addtional) }
+                    this.pushLog(`${ params.osc } - ${ params.value }`, 'info')
+                    ipcRenderer.send('oscMessage', { message: JSON.stringify(params) })
+                  }
+                })
+
+                break
+              // Control change
+              case 0xB:
+                this.pushLog(`Control change - ${ data[1] } - ${ data[2] }`, 'info')
+                this.controls.forEach((control) => {
+                  if (control.event === 'ControlChange' && control.controlNumber === data[1] && control.osc !== '') {
+                    const params = { osc: control.osc, value: (Number(data[2]) / 127) + Number(control.addtional) }
+                    this.pushLog(`${ params.osc } - ${ params.value }`, 'info')
+                    ipcRenderer.send('oscMessage', { message: JSON.stringify(params) })
+                  }
+                })
+
+                break
+            }
+          })
+        })
+      },
+      pushLog(message, type = 'default') {
+        this.logs.unshift({ message: message, type: type})
+      }
+    },
+    mounted() {
+      const onSuccess = (midiAccess) => {
+        if (midiAccess.inputs.size === 0) {
+          this.pushLog('MIDIデバイスを検出できませんでした', 'error')
+          return
+        }
+
+        this.setUpEventListener(midiAccess)
+      }
+      const onFailure = (message) => {
+        this.pushLog('Web MIDI APIへの接続が失敗しました', 'error')
+        this.pushLog(message, 'error')
+      }
+      navigator.requestMIDIAccess().then(onSuccess, onFailure)
+    }
+  }
+
+  Vue.createApp(Counter).mount('#app')
+</script>
+</html>
